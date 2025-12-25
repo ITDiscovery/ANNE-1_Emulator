@@ -1,4 +1,4 @@
-#ifndef MOTO6809_H
+#ifndef MOTO6809_H 
 #define MOTO6809_H
 
 #include <stdint.h>
@@ -19,6 +19,24 @@ class MOTO6809 {
 private:
     mc6809__t* cpu_core = nullptr; 
     ANNHal* hal;
+
+    struct StepRecord {
+    uint16_t pc;
+    uint8_t  opcode;
+    uint8_t  accA;
+    uint8_t  accB;
+    uint16_t regX;
+    uint16_t regS; // Vital for stack crashes
+    };
+    StepRecord history[16]; // Keep last 16 steps
+    uint8_t historyIdx = 0;
+
+    // C-STYLE GLUE FUNCTIONS (Implemented in MOTO6809.cpp)
+    static uint8_t core_read(struct mc6809 *cpu, uint16_t addr, bool is_code);
+    static void core_write(struct mc6809 *cpu, uint16_t addr, uint8_t val);
+    static void core_fault(struct mc6809 *cpu, int fault_code);
+    void do_cmp8(mc6809__t* c, uint8_t r, uint8_t m);
+    void do_cmp16(mc6809__t* c, uint16_t r, uint16_t m);
 
 public:
     // Constructor/Destructor
@@ -44,12 +62,8 @@ public:
 
     void triggerNMI();
     void cancelWait();
-    
-private:
-    // C-STYLE GLUE FUNCTIONS (Implemented in MOTO6809.cpp)
-    static uint8_t core_read(struct mc6809 *cpu, uint16_t addr, bool is_code);
-    static void core_write(struct mc6809 *cpu, uint16_t addr, uint8_t val);
-    static void core_fault(struct mc6809 *cpu, int fault_code);
+
+    void printCrashDump();
 };
 
 #endif

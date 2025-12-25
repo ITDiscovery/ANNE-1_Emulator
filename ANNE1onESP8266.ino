@@ -71,14 +71,13 @@ void setup() {
   if (digitalRead(PIN_MODE_SELECT) == LOW) {
     hal->keypadMode = false;
     Serial.println(">> Jumper Detected: TTY Mode Active");
-    Serial.println(">> EXT BASIC at 0x8000");
-
+    //Serial.println(">> EXT BASIC at 0xC000");
+    cpu->setPC(0x8100);
   } else {
     hal->keypadMode = true;
     Serial.println(">> No Jumper: Keypad Mode Active");
   }
-  //cpu->setPC(0x8000);
-  hal->debug_dump =false;
+  hal->debug_dump = false;
 }
 
 unsigned long lastHwUpdate = 0;

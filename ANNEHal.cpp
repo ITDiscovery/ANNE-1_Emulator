@@ -1,6 +1,7 @@
-#include "ANNEHal.h"
+#include "ANNEHal.h" 
 #include "ANNE_ROM.h"
-#include "BASIC_ROM.h"
+//#include "BASIC_ROM.h"
+#include "CPU_TEST_ROM.h"
 
 ANNHal::ANNHal() {}
 
@@ -17,18 +18,30 @@ void ANNHal::begin() {
 bool ANNHal::initMemory() {
     if (ram) free(ram);
     if (rom) free(rom);
-
-    ram = (uint8_t*)malloc(RAM_SIZE);
-    rom = (uint8_t*)malloc(ROM_SIZE);
     
-    basic_rom = ANNE_BASIC_ROM; 
+    // 1. Allocate RAM as usual
+    ram = (uint8_t*)malloc(RAM_SIZE); // 16KB ($0000-$3FFF)
+    rom = (uint8_t*)malloc(ROM_SIZE); // Monitor RAM ($F000-$FFFF)
 
-    if (!ram || !rom) return false;
+    // 2. Allocate the "Test Window" (Formerly BASIC)
+    // We defined BASIC_SIZE as 20480 in the previous step ($8000-$CFFF)
+    // We allocate RAM for it so the test can write to variables if needed.
+    uint8_t* test_area = (uint8_t*)malloc(BASIC_SIZE);
+    
+    // 3. Point basic_rom to this new writable area
+    basic_rom = test_area; 
 
-    // Clear RAM
+    if (!ram || !rom || !basic_rom) return false;
+
+    // 4. Clear Memory
     memset(ram, 0x00, RAM_SIZE);
     memset(rom, 0xFF, ROM_SIZE);
-    
+    memset(test_area, 0x00, BASIC_SIZE);
+
+    // 5. LOAD THE TEST SUITE
+    // Map: $8100 (Code Start) - $8000 (Base) = Offset 0x100
+    memcpy(test_area, CPU_TEST_ROM, sizeof(CPU_TEST_ROM));
+
     return true;
 }
 
@@ -46,8 +59,12 @@ uint8_t ANNHal::read(uint16_t addr) {
     if (addr < 0x4000) return ram[addr];
 
     // 2. EXTENDED BASIC ($C000 - $EFFF) [12KB]
-    if (addr >= 0xC000 && addr < 0xF000) {
-        return pgm_read_byte(&basic_rom[addr - 0xC000]);
+    //if (addr >= 0xC000 && addr < 0xF000) {
+    //    return pgm_read_byte(&basic_rom[addr - 0xC000]);
+    //}
+    // 2A. CPU TEST ROM ($8100 - $C580) [Length: 0x4480]
+    if (addr >= 0x8100 && addr < 0xC580) {
+        return pgm_read_byte(&basic_rom[addr - 0x8100]);
     }
 
     // 3. I/O REGION ($FFxx) 

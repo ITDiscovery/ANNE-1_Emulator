@@ -1,4 +1,4 @@
-// MOTO6809.cpp - Full 6809 Core Implementation
+// MOTO6809.cpp - Full 6809 Core Implementation 
 #include "MOTO6809.h"
 #include "ANNEHal.h"
 #include <stdio.h> 
@@ -154,31 +154,13 @@ void pull_s(mc6809__t* cpu, uint8_t mask) {
     if(mask & 0x80) { uint8_t h=hal->read(cpu->s++); uint8_t l=hal->read(cpu->s++); cpu->pc = (h<<8)|l; }
 }
 
-// Helper for 16-bit Compare (CMPD, CMPX, CMPY, CMPU, CMPS)
-static void do_cmp16(mc6809__t* c, uint16_t reg_val, uint16_t mem_val) {
-    uint32_t r = (uint32_t)reg_val - (uint32_t)mem_val;
-    
-    // Set N and Z based on result
-    c->cc &= ~(CC_N | CC_Z | CC_V | CC_C);
-    if ((r & 0xFFFF) == 0) c->cc |= CC_Z;
-    if (r & 0x8000) c->cc |= CC_N;
-    
-    // Set C (Borrow) if Reg < Mem (Unsigned)
-    if (reg_val < mem_val) c->cc |= CC_C;
-    
-    // Set V (Overflow) - Standard subtraction overflow logic for 16-bit
-    // (Pos - Neg = Neg) or (Neg - Pos = Pos)
-    if (((reg_val ^ mem_val) & 0x8000) && ((reg_val ^ r) & 0x8000)) c->cc |= CC_V;
-}
-
 // --- BRANCH HELPER ---
-// Handles 8-bit offset branches
 static void do_branch(mc6809__t* c, bool condition) {
-    int8_t offset = fetch(c); // Always fetch the offset to advance PC
+    int8_t offset = (int8_t)fetch(c); // ALWAYS fetch to advance PC
     if (condition) {
         c->pc += offset;
-        c->cycles += 3; // Branch taken penalty usually included? 6809 is 3 cycles taken or not.
     }
+    c->cycles += 3; // 6809 always takes 3 cycles for short branches
 }
 
 // Handles 16-bit offset "Long" branches
@@ -244,6 +226,15 @@ void MOTO6809::write8(uint16_t addr, uint8_t val) const { hal->write(addr, val);
 void MOTO6809::Run(int32_t cycles) {
     int32_t target = cpu_core->cycles + cycles;
     while (cpu_core->cycles < target) {
+
+        // AUTO-TRIGGER DEBUGGING ---
+        // 0xC093 is the first instruction AFTER the memory check loop.
+        //if (cpu_core->pc >= 0x8100 && cpu_core->pc < 0xF000) {
+        //    hal->debug_dump = true; 
+        //} else {
+        //    hal->debug_dump = false; 
+        //}
+
         hal->system_check(this);
         if (hal->debug_dump) {
              Serial.print("PC:"); Serial.print(cpu_core->pc, HEX);
@@ -287,6 +278,7 @@ uint16_t resolve_indexed(mc6809__t* cpu) {
     uint16_t addr = 0;
     uint16_t reg_val = 0;
     
+    // 1. Select Register
     switch((post >> 5) & 0x03) {
         case 0: reg_val = cpu->x; break;
         case 1: reg_val = cpu->y; break;
@@ -294,29 +286,47 @@ uint16_t resolve_indexed(mc6809__t* cpu) {
         case 3: reg_val = cpu->s; break;
     }
 
+    // 2. Determine Mode & Offset
     if ((post & 0x80) == 0) { 
+        // 5-bit Offset (Direct only)
         int8_t offset = (post & 0x1F);
-        if (offset & 0x10) offset |= 0xE0; 
+        if (offset & 0x10) offset |= 0xE0; // Sign extend
         addr = reg_val + offset;
         cpu->cycles += 1;
     } else {
+        // Complex Modes
+        // FIX: Added Indirect cases (0x1X) to match Direct cases (0x0X)
         switch(post & 0x1F) {
-            case 0x00: addr = reg_val++; break; 
-            case 0x01: addr = reg_val; reg_val += 2; break; 
-            case 0x02: addr = --reg_val; break; 
-            case 0x03: reg_val -= 2; addr = reg_val; break; 
-            case 0x04: addr = reg_val; break; 
-            case 0x05: addr = reg_val + (int8_t)cpu->d.b.l; break; 
-            case 0x06: addr = reg_val + (int8_t)cpu->d.b.h; break; 
-            case 0x08: addr = reg_val + (int8_t)fetch(cpu); break; 
-            case 0x09: addr = reg_val + (int16_t)fetch16(cpu); break; 
-            case 0x0B: addr = reg_val + cpu->d.w; break; 
-            case 0x0C: addr = cpu->pc + (int8_t)fetch(cpu); break; 
-            case 0x0D: addr = cpu->pc + (int16_t)fetch16(cpu); break; 
+            // Auto Increment/Decrement
+            case 0x00: addr = reg_val++; break;              // ,R+
+            case 0x01: case 0x11: addr = reg_val; reg_val += 2; break; // ,R++ and [,R++]
+            case 0x02: addr = --reg_val; break;              // ,-R
+            case 0x03: case 0x13: reg_val -= 2; addr = reg_val; break; // ,--R and [,--R]
+            
+            // Zero Offset
+            case 0x04: case 0x14: addr = reg_val; break;     // ,R and [,R]
+            
+            // Accumulator Offsets
+            case 0x05: case 0x15: addr = reg_val + (int8_t)cpu->d.b.l; break; // B,R
+            case 0x06: case 0x16: addr = reg_val + (int8_t)cpu->d.b.h; break; // A,R
+            case 0x0B: case 0x1B: addr = reg_val + cpu->d.w; break;           // D,R
+            
+            // Constant Offsets (8-bit / 16-bit)
+            case 0x08: case 0x18: addr = reg_val + (int8_t)fetch(cpu); break;  // 8-bit
+            case 0x09: case 0x19: addr = reg_val + (int16_t)fetch16(cpu); break; // 16-bit
+            
+            // PC Relative
+            case 0x0C: case 0x1C: addr = cpu->pc + (int8_t)fetch(cpu); break;  // 8-bit PC
+            case 0x0D: case 0x1D: addr = cpu->pc + (int16_t)fetch16(cpu); break; // 16-bit PC
+            
+            // Extended Indirect [nnnn]
             case 0x1F: addr = fetch16(cpu); break; 
+            
             default: addr = reg_val; break;
         }
         
+        // Write-back Register Update
+        // (Only matters for Auto Inc/Dec which modified reg_val directly)
         switch((post >> 5) & 0x03) {
             case 0: cpu->x = reg_val; break;
             case 1: cpu->y = reg_val; break;
@@ -325,6 +335,9 @@ uint16_t resolve_indexed(mc6809__t* cpu) {
         }
     }
     
+    // 3. Handle Indirection (Bit 4 set)
+    // This performs the final memory lookup if the mode was Indirect
+    // Note: 5-bit offsets (post & 0x80 == 0) are never indirect.
     if ((post & 0x10) && (post & 0x80)) {
         ANNHal* hal = (ANNHal*)cpu->user;
         uint8_t h = hal->read(addr);
@@ -350,6 +363,42 @@ uint16_t get_ea(mc6809__t* cpu) {
 int MOTO6809::step() {
     mc6809__t* c = cpu_core;
     ANNHal* h = (ANNHal*)c->user;
+
+    // --- EXTENDED TRACE (Tokenizer + GETNCH) ---
+    //bool trace_tokenizer = (cpu_core->pc >= 0xD189 && cpu_core->pc <= 0xD1B0);
+    //bool trace_getnch    = (cpu_core->pc >= 0xE77B && cpu_core->pc <= 0xE790); // <--- NEW
+    //
+    //if (trace_tokenizer || trace_getnch) {
+    //    ANNHal* h = (ANNHal*)cpu_core->user;
+    //    uint8_t op = h->read(cpu_core->pc);
+    //
+    //    Serial.print("[TRACE] PC:"); 
+    //    Serial.print(cpu_core->pc, HEX);
+    //    Serial.print(" OP:"); 
+    //    Serial.print(op, HEX);
+    //
+    //    // Print critical registers
+    //    Serial.print(" | A:"); Serial.print(cpu_core->d.b.h, HEX);
+    //    Serial.print(" X:"); Serial.print(cpu_core->x, HEX);
+    //
+    //    // If we are at the specific buggy instruction, tell us what it's doing
+    //    if (cpu_core->pc == 0xE783) {
+    //        Serial.print(" <--- EXECUTING LA123 (GET CHAR)");
+    //    }
+    //    Serial.println();
+    //}
+    // -------------------------------------------
+
+    // --- FLIGHT RECORDER START ---
+    // Record state BEFORE execution
+    history[historyIdx].pc = c->pc;
+    history[historyIdx].opcode = h->read(c->pc);
+    history[historyIdx].accA = c->d.b.h;
+    history[historyIdx].accB = c->d.b.l;
+    history[historyIdx].regX = c->x;
+    history[historyIdx].regS = c->s;
+    historyIdx = (historyIdx + 1) % 16;
+    // -----------------------------
 
     // --- 1. HANDLE NMI (ST KEY) ---
     if (c->nmi_pending) {
@@ -440,16 +489,27 @@ int MOTO6809::step() {
         // --- 16-BIT LOADS (LDX, LDY) ---
         // LDX (Load X) - 8E, 9E, AE, BE
         case 0x8E: case 0x9E: case 0xAE: case 0xBE: 
-            if (c->mode == IMM) c->x = fetch16(c); 
-            else { ea = get_ea(c); c->x = (h->read(ea) << 8) | h->read(ea+1); }
-            set_nz16(c, c->x); c->cycles+=3; 
+            // FIX: Explicitly check for Opcode 0x8E (Immediate) to prevent mode detection errors
+            if (c->mode == IMM || c->ir == 0x8E) {
+                c->x = fetch16(c); 
+            } else { 
+                ea = get_ea(c); 
+                c->x = (h->read(ea) << 8) | h->read(ea+1); 
+            }
+            set_nz16(c, c->x); 
+            c->cycles += 3; 
             break;
 
         // LDY (Load Y) - 108E, 109E, 10AE, 10BE
         case 0x108E: case 0x109E: case 0x10AE: case 0x10BE:
-            if (c->mode == IMM) c->y = fetch16(c); 
-            else { ea = get_ea(c); c->y = (h->read(ea) << 8) | h->read(ea+1); }
-            set_nz16(c, c->y); c->cycles+=4; 
+            if (c->mode == IMM || c->ir == 0x108E) { // <--- Added Explicit Check
+                c->y = fetch16(c); 
+            } else { 
+                ea = get_ea(c); 
+                c->y = (h->read(ea) << 8) | h->read(ea+1); 
+            }
+            set_nz16(c, c->y); 
+            c->cycles += 4; 
             break;
 
         // LDS (Load S) - 10CE (Imm), 10DE (Dir), 10EE (Ind), 10FE (Ext)
@@ -559,25 +619,31 @@ int MOTO6809::step() {
             break;
 
         // DAA (Decimal Adjust Accumulator)
-        // Adjusts A to valid BCD format after an ADD/ADC instruction
         case 0x19: {
-            uint16_t t = c->d.b.h;
-            uint8_t cf = 0; // Correction factor
+            uint8_t old_A = c->d.b.h;
+            uint8_t cf = 0;
             
-            // 1. If lower nibble > 9 or Half-Carry (H) is set
-            if ((c->d.b.h & 0x0F) > 0x09 || (c->cc & CC_H)) {
+            // 1. Lower Nibble Correction
+            // Triggered if low nibble > 9 OR Half-Carry (H) is set
+            if ((old_A & 0x0F) > 0x09 || (c->cc & CC_H)) {
                 cf |= 0x06;
             }
-            // 2. If upper nibble > 9, Carry (C) is set, or upper > 8 & lower > 9
-            if ((c->d.b.h > 0x99) || (c->cc & CC_C) || ((c->d.b.h > 0x8F) && (cf == 6))) {
+            
+            // 2. Upper Nibble Correction
+            // Triggered if:
+            // a) A > 0x99 
+            // b) Carry (C) is set
+            // c) Upper nibble > 8 AND Low nibble > 9 
+            //    (CRITICAL FIX: Do NOT use 'cf==6' here, as H=1 shouldn't trigger this)
+            if (old_A > 0x99 || (c->cc & CC_C) || 
+               ((old_A > 0x8F) && ((old_A & 0x0F) > 0x09))) {
                 cf |= 0x60;
-                c->cc |= CC_C; // DAA sets Carry if correction indicates overflow
+                c->cc |= CC_C; // DAA sets Carry if upper correction is needed
             }
             
-            t += cf;
-            c->d.b.h = (uint8_t)t;
+            c->d.b.h = old_A + cf;
             
-            // Updates N and Z, V is technically undefined but usually preserved
+            // Updates N and Z. V is undefined (we leave it alone or use set_nz)
             set_nz(c, c->d.b.h); 
             c->cycles += 2;
         } break;
@@ -614,23 +680,46 @@ int MOTO6809::step() {
             if(c->d.b.h < val) c->cc |= CC_C; else c->cc &= ~CC_C; 
             c->cycles+=2; break;
 
-        case 0xC1: case 0xD1: case 0xE1: case 0xF1: // CMPB
+         case 0xC1: case 0xD1: case 0xE1: case 0xF1: // CMPB
             ea = (c->mode == IMM) ? c->pc++ : get_ea(c);
             val = h->read(ea);
             v16 = c->d.b.l - val;
             set_nz(c, (uint8_t)v16);
             if(c->d.b.l < val) c->cc |= CC_C; else c->cc &= ~CC_C;
             c->cycles+=2; break;
-            
+
         // --- BRANCHES (8-bit Offset) ---
+
+        // BNE (Branch if Not Equal / Not Zero) - 26
+        // Logic: Branch if Z-Flag is 0
+        case 0x26: 
+            {
+                int8_t rel = (int8_t)fetch(c); // Fetch Offset
+                if ((c->cc & CC_Z) == 0) {     // Explicit Zero Check
+                    c->pc += rel;
+                }
+                c->cycles += 3;
+            }
+            break;
+
+        // BEQ (Branch if Equal / Zero) - 27
+        // Logic: Branch if Z-Flag is 1
+        case 0x27: 
+            {
+                int8_t rel = (int8_t)fetch(c); // Fetch Offset
+                if (c->cc & CC_Z) {            // Explicit Set Check
+                    c->pc += rel;
+                }
+                c->cycles += 3;
+            }
+            break;
+
         case 0x20: do_branch(c, true); break; // BRA
         case 0x21: do_branch(c, false); break; // BRN (Never)
         case 0x22: do_branch(c, !((c->cc & CC_C) || (c->cc & CC_Z))); break; // BHI (C+Z=0)
         case 0x23: do_branch(c, (c->cc & CC_C) || (c->cc & CC_Z)); break; // BLS (C+Z=1)
         case 0x24: do_branch(c, !(c->cc & CC_C)); break; // BCC (C=0)
         case 0x25: do_branch(c, (c->cc & CC_C)); break;  // BCS (C=1)
-        case 0x26: do_branch(c, !(c->cc & CC_Z)); break; // BNE (Z=0)
-        case 0x27: do_branch(c, (c->cc & CC_Z)); break;  // BEQ (Z=1)
         case 0x28: do_branch(c, !(c->cc & CC_V)); break; // BVC (V=0)
         case 0x29: do_branch(c, (c->cc & CC_V)); break;  // BVS (V=1)
         case 0x2A: do_branch(c, !(c->cc & CC_N)); break; // BPL (N=0)
@@ -801,13 +890,38 @@ int MOTO6809::step() {
             update_flags_math(c, v16, c->d.b.l, val, false);
             c->d.b.l = (uint8_t)v16; c->cycles += 2; break;
 
-        case 0x80: case 0x90: case 0xA0: case 0xB0: // SUBA
+        // SUBA (Subtract Memory from A) - 80, 90, A0, B0
+        case 0x80: case 0x90: case 0xA0: case 0xB0:
+            // 1. Fetch Operand
             ea = (c->mode == IMM) ? c->pc++ : get_ea(c);
             val = h->read(ea);
-            v16 = c->d.b.h - val; 
-            update_flags_math(c, v16, c->d.b.h, val, true);
-            c->d.b.h = (uint8_t)(v16 & 0xFF); // Force mask and cast
-            c->cycles += 2; break;
+            
+            // 2. Perform Math (Inline to guarantee flags)
+            {
+                uint16_t r = c->d.b.h; // Register A
+                uint16_t m = val;      // Memory
+                uint16_t res = r - m;  // 16-bit result to catch borrows
+                
+                c->cc &= ~(CC_N | CC_Z | CC_V | CC_C); // Clear flags
+                
+                // N: Result is negative (Bit 7 of 8-bit result)
+                if (res & 0x80) c->cc |= CC_N;
+                
+                // Z: Result is zero (Low 8 bits only!)
+                if ((res & 0xFF) == 0) c->cc |= CC_Z;
+                
+                // V: Overflow (Standard subtraction formula)
+                // (Reg ^ Mem) & (Reg ^ Result) & 0x80
+                if (((r ^ m) & 0x80) && ((r ^ res) & 0x80)) c->cc |= CC_V;
+
+                // C: Borrow (Unsigned comparison)
+                if (r < m) c->cc |= CC_C;
+                
+                // 3. Store Result
+                c->d.b.h = (uint8_t)res;
+            }
+            c->cycles += 2; 
+            break;
 
         case 0xC0: case 0xD0: case 0xE0: case 0xF0: // SUBB
             ea = (c->mode == IMM) ? c->pc++ : get_ea(c);
@@ -869,14 +983,29 @@ int MOTO6809::step() {
 
         // --- MISC ---
         case 0x3D: // MUL
+            // 1. Perform Multiplication
             c->d.w = (uint16_t)c->d.b.h * (uint16_t)c->d.b.l;
-            c->cc &= ~CC_C; 
-            c->cc &= ~CC_Z; if(c->d.w == 0) c->cc |= CC_Z;
-            c->cycles += 11; break;
+            
+            // 2. Set Zero Flag (Standard)
+            c->cc &= ~CC_Z; 
+            if(c->d.w == 0) c->cc |= CC_Z;
+            
+            // 3. THE FIX: Set Carry Flag to Bit 7 of the Result (B register)
+            c->cc &= ~CC_C;
+            if (c->d.b.l & 0x80) c->cc |= CC_C; // <--- OFTEN MISSED!
+            
+            c->cycles += 11; 
+            break;
 
-        case 0x1D: // SEX
+        case 0x1D: // SEX (Sign Extend B into A)
+            // 1. Perform Extension
             c->d.b.h = (c->d.b.l & 0x80) ? 0xFF : 0x00;
-            set_nz(c, c->d.b.h); set_nz16(c, c->d.w); c->cycles += 2; break;
+            
+            // 2. THE FIX: Update N and Z based on 16-bit D, not just A
+            set_nz16(c, c->d.w); // <--- Ensure this checks D, not A!
+            
+            c->cycles += 2; 
+            break;
             
         // SYNC (Synchronize to External Event)
         case 0x13:
@@ -889,13 +1018,12 @@ int MOTO6809::step() {
         // --- 16-BIT COMPARES ---        
         // CMPX (Compare X) - 8C, 9C, AC, BC
         case 0x8C: case 0x9C: case 0xAC: case 0xBC:
-            ea = (c->mode == IMM) ? c->pc++ : get_ea(c);
-            if (c->mode == IMM) { v16 = (ea << 8) | fetch(c); } // IMM is 16-bit for CMPX
-            else { v16 = fetch16(c); } // Standard fetch for memory
-            // WAIT! My fetch logic for IMM above is slightly wrong for get_ea abstraction.
-            // Let's stick to the pattern:
-            if (c->mode == IMM) v16 = fetch16(c); 
-            else { ea = get_ea(c); v16 = (h->read(ea) << 8) | h->read(ea+1); }
+            if (c->mode == IMM) { 
+                v16 = fetch16(c); 
+            } else { 
+                ea = get_ea(c); 
+                v16 = (h->read(ea) << 8) | h->read(ea+1); 
+            }
             do_cmp16(c, c->x, v16);
             c->cycles += 4; 
             break;
@@ -993,9 +1121,12 @@ int MOTO6809::step() {
             c->mode = IND; c->y = get_ea(c); 
             if(c->y == 0) c->cc |= CC_Z; else c->cc &= ~CC_Z; // Affects Z
             c->cycles += 4; break;
-        case 0x32: // LEAS
-            c->mode = IND; c->s = get_ea(c); 
-            c->cycles += 4; break; 
+        // LEAS (Load Effective Address to S) - 32
+        case 0x32: 
+            ea = resolve_indexed(c); 
+            c->s = ea; 
+            c->cycles += 2; 
+            break;
         case 0x33: // LEAU
             c->mode = IND; c->u = get_ea(c); 
             c->cycles += 4; break;
@@ -1059,6 +1190,7 @@ int MOTO6809::step() {
             Serial.print(c->ir, HEX); // The bad byte
             Serial.print(" at PC: ");
             Serial.println(c->pc - 1, HEX); // -1 because fetch() advanced it
+            printCrashDump();
             
             // 3. Panic Delay (2 seconds)
             // Allows you to see the LED and prevents flooding the Serial console
@@ -1073,4 +1205,53 @@ int MOTO6809::step() {
             break;
     }
     return 0;
+}
+
+void MOTO6809::do_cmp8(mc6809__t* c, uint8_t r, uint8_t m) {
+    uint16_t res = (uint16_t)r - (uint16_t)m;
+    c->cc &= ~(CC_N | CC_Z | CC_V | CC_C);
+    
+    if (res & 0x80) c->cc |= CC_N;
+    if ((res & 0xFF) == 0) c->cc |= CC_Z;  // <--- MUST HAVE & 0xFF
+    
+    // Overflow: (Reg ^ Mem) & (Reg ^ Result) & 0x80
+    if (((r ^ m) & 0x80) && ((r ^ res) & 0x80)) c->cc |= CC_V;
+
+    // Borrow: Reg < Mem
+    if (r < m) c->cc |= CC_C;
+}
+
+// 16-bit Comparison (CMPX, CMPY, CMPU, CMPS, CMPD)
+void MOTO6809::do_cmp16(mc6809__t* c, uint16_t r, uint16_t m) {
+    uint32_t res = (uint32_t)r - (uint32_t)m;
+    c->cc &= ~(CC_N | CC_Z | CC_V | CC_C); // Clear flags
+
+    if (res & 0x8000) c->cc |= CC_N;        // Negative (Bit 15)
+    if ((res & 0xFFFF) == 0) c->cc |= CC_Z; // Zero
+    
+    // Overflow: (Reg ^ Mem) & (Reg ^ Result) & 0x8000
+    if (((r ^ m) & 0x8000) && ((r ^ res) & 0x8000)) c->cc |= CC_V;
+
+    // Borrow/Carry: Reg < Mem
+    if (r < m) c->cc |= CC_C;
+}
+
+void MOTO6809::printCrashDump() {
+    Serial.println("\n--- CRASH FLIGHT RECORDER ---");
+    // Print from oldest to newest
+    uint8_t idx = historyIdx; 
+    for (int i = 0; i < 16; i++) {
+        StepRecord& r = history[idx];
+        Serial.print("["); 
+        if (i < 9) Serial.print("0"); Serial.print(i + 1);
+        Serial.print("] PC:"); Serial.print(r.pc, HEX);
+        Serial.print("  OP:"); Serial.print(r.opcode, HEX);
+        Serial.print("  A:");  Serial.print(r.accA, HEX);
+        Serial.print("  B:");  Serial.print(r.accB, HEX);
+        Serial.print("  X:");  Serial.print(r.regX, HEX);
+        Serial.print("  S:");  Serial.println(r.regS, HEX);
+        
+        idx = (idx + 1) % 16;
+    }
+    Serial.println("-----------------------------");
 }

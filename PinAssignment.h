@@ -14,7 +14,7 @@
    
    SERIAL PINS:
    - TX (GPIO 1) / RX (GPIO 3): Reserved for Monitor/Upload.
-*/
+*/ 
 
 // Display Pins (TM1638)
 #define PIN_STB1    16  // D0 (GPIO16) -> Pin 37 on DSKY

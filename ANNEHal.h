@@ -9,7 +9,8 @@ class MOTO6809;
 
 // --- Memory Configuration ---
 #define RAM_SIZE     16384 // $0000-$3FFF (16KB)
-#define BASIC_SIZE   12288 // $C000-$EFFF (12KB)
+//#define BASIC_SIZE   12288 // $C000-$EFFF (12KB)
+#define BASIC_SIZE 4480 // $8100 
 #define ROM_SIZE     4096  // $F000-$FFFF (4KB)
 
 // Display Registers (Write-Only) - Custom Hardware Area
@@ -27,7 +28,7 @@ class MOTO6809;
 
 class ANNHal {
   public:
-    TM1638 hardware;
+    TM1638 hardware; 
     
     // Memory Pointers
     uint8_t *ram = nullptr;
