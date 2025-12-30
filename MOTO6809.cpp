@@ -1,4 +1,24 @@
-// MOTO6809.cpp - Full 6809 Core Implementation 
+/* MOTO6809.cpp - Full 6809 Core Implementation 
+Copyright (c) 2026 Peter Nichols
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
 #include "MOTO6809.h"
 #include "ANNEHal.h"
 #include <stdio.h> 
@@ -56,27 +76,33 @@ enum { INH, IMM, DIR, IND, EXT, REL };
 #define CC_E 0x80
 
 // --- HELPER FUNCTIONS ---
-
 static void set_nz(mc6809__t* cpu, uint8_t r) {
-    cpu->cc &= ~(CC_N | CC_Z);
+    // Clear V flag too (Logic/Load ops always clear V)
+    cpu->cc &= ~(CC_N | CC_Z | CC_V); 
+    
     if (r == 0) cpu->cc |= CC_Z;
     if (r & 0x80) cpu->cc |= CC_N;
 }
 
 static void set_nz16(mc6809__t* cpu, uint16_t r) {
-    cpu->cc &= ~(CC_N | CC_Z);
+    // Clear V flag too
+    cpu->cc &= ~(CC_N | CC_Z | CC_V);
+    
     if (r == 0) cpu->cc |= CC_Z;
     if (r & 0x8000) cpu->cc |= CC_N;
 }
 
-// Helper for Math Flags
+// Helper for Math Flags (FIXED)
 void update_flags_math(mc6809__t* c, uint16_t r, uint8_t v1, uint8_t v2, bool is_sub) {
     c->cc &= ~(CC_H | CC_N | CC_Z | CC_V | CC_C); 
     uint8_t r8 = (uint8_t)r;
     if (r8 == 0) c->cc |= CC_Z;
     if (r8 & 0x80) c->cc |= CC_N;
+    
     if (is_sub) {
-        if (v1 < v2) c->cc |= CC_C; 
+        // Check 16-bit result for underflow (borrow)
+        if (r > 0xFF) c->cc |= CC_C; 
+        
         if (((v1 ^ v2) & 0x80) && ((v1 ^ r8) & 0x80)) c->cc |= CC_V;
     } else {
         if (r & 0x100) c->cc |= CC_C; 
@@ -85,11 +111,29 @@ void update_flags_math(mc6809__t* c, uint16_t r, uint8_t v1, uint8_t v2, bool is
     }
 }
 
-// 3. FIXED: Moved Shift Logic outside switch
+// 16-BIT MATH FLAG HELPER (Must be defined before step())
+static void update_flags_math16(mc6809__t* c, uint32_t r, uint16_t v1, uint16_t v2, bool is_sub) {
+    c->cc &= ~(CC_N | CC_Z | CC_V | CC_C);
+    uint16_t r16 = (uint16_t)r;
+    
+    if (r16 == 0) c->cc |= CC_Z;
+    if (r16 & 0x8000) c->cc |= CC_N;
+    
+    if (is_sub) {
+        if (v1 < v2) c->cc |= CC_C; 
+        if (((v1 ^ v2) & 0x8000) && ((v1 ^ r16) & 0x8000)) c->cc |= CC_V;
+    } else {
+        if (r & 0x10000) c->cc |= CC_C; 
+        if (!((v1 ^ v2) & 0x8000) && ((v1 ^ r16) & 0x8000)) c->cc |= CC_V;
+    }
+}
+
 // Type: 0=LSL, 1=LSR, 2=ROL, 3=ROR, 4=ASR
 static void do_shift_logic(mc6809__t* c, uint8_t& val, int type) {
     bool old_c = (c->cc & CC_C);
     bool new_c = false;
+    
+    // Perform Shift
     if(type == 0) { // LSL/ASL
         new_c = (val & 0x80); val <<= 1;
     } else if(type == 1) { // LSR
@@ -101,8 +145,20 @@ static void do_shift_logic(mc6809__t* c, uint8_t& val, int type) {
     } else if(type == 4) { // ASR
         new_c = (val & 0x01); uint8_t sign = (val & 0x80); val >>= 1; val |= sign;
     }
+
+    // 1. Update Carry
     if(new_c) c->cc |= CC_C; else c->cc &= ~CC_C;
+    
+    // 2. Update N and Z (and Clear V)
     set_nz(c, val);
+    
+    // Calculate V = N XOR C
+    bool n = (c->cc & CC_N);
+    bool curr_c = (c->cc & CC_C);
+    
+    if (n ^ curr_c) {
+        c->cc |= CC_V; // Set V if N != C
+    }
 }
 
 // Stack Helpers
@@ -172,26 +228,6 @@ static void do_lbranch(mc6809__t* c, bool condition) {
     }
 }
 
-// --- 16-BIT MATH FLAG HELPER ---
-// Needed for ADDD and SUBD
-static void update_flags_math16(mc6809__t* c, uint32_t r, uint16_t v1, uint16_t v2, bool is_sub) {
-    c->cc &= ~(CC_N | CC_Z | CC_V | CC_C);
-    uint16_t r16 = (uint16_t)r;
-    
-    if (r16 == 0) c->cc |= CC_Z;
-    if (r16 & 0x8000) c->cc |= CC_N;
-    
-    if (is_sub) {
-        if (v1 < v2) c->cc |= CC_C; // Borrow
-        // Overflow: (Pos - Neg = Neg) or (Neg - Pos = Pos)
-        if (((v1 ^ v2) & 0x8000) && ((v1 ^ r16) & 0x8000)) c->cc |= CC_V;
-    } else {
-        if (r & 0x10000) c->cc |= CC_C; // Carry
-        // Overflow: (Pos + Pos = Neg) or (Neg + Neg = Pos)
-        if (!((v1 ^ v2) & 0x8000) && ((v1 ^ r16) & 0x8000)) c->cc |= CC_V;
-    }
-}
-
 // --- CLASS LIFECYCLE ---
 MOTO6809::MOTO6809(ANNHal* halInstance) : hal(halInstance) {
     cpu_core = new mc6809__t;
@@ -225,22 +261,44 @@ void MOTO6809::write8(uint16_t addr, uint8_t val) const { hal->write(addr, val);
 
 void MOTO6809::Run(int32_t cycles) {
     int32_t target = cpu_core->cycles + cycles;
+    static int traceCountdown = 0;
+
     while (cpu_core->cycles < target) {
-
-        // AUTO-TRIGGER DEBUGGING ---
-        // 0xC093 is the first instruction AFTER the memory check loop.
-        //if (cpu_core->pc >= 0x8100 && cpu_core->pc < 0xF000) {
-        //    hal->debug_dump = true; 
-        //} else {
-        //    hal->debug_dump = false; 
-        //}
-
         hal->system_check(this);
-        if (hal->debug_dump) {
-             Serial.print("PC:"); Serial.print(cpu_core->pc, HEX);
-             Serial.print(" OP:"); Serial.print(hal->read(cpu_core->pc), HEX);
-             Serial.print(" A:"); Serial.print(cpu_core->d.b.h, HEX);
-             Serial.print(" B:"); Serial.println(cpu_core->d.b.l, HEX);
+
+        // --- TRIGGER TRACE ---
+        // Trigger slightly before the crash site
+        //if (cpu_core->pc == 0x2000 && traceCountdown == 0) {
+        //    Serial.println("\n--- TRACE START (PCR TESTS) ---");
+        //    traceCountdown = 250; // Dump the next 20 instructions
+        //}
+        // --- STACK RUNAWAY TRAP ---
+        // If PC points into the stack area (RAM_TOP), something has gone wrong.
+        //if (cpu_core->pc >= 0x3F00 && cpu_core->pc <= 0x3FFF) {
+        //     if (traceCountdown == 0) { // Only print if not already tracing
+        //         Serial.print("\n[CRASH] PC in STACK at ");
+        //         Serial.println(cpu_core->pc, HEX);
+        //         traceCountdown = 10;
+        //     }
+        //}
+        if (hal->debug_dump == true) {
+            uint8_t op = hal->read(cpu_core->pc);
+            
+            Serial.print("[");
+            Serial.print(traceCountdown);
+            Serial.print("] PC:"); 
+            Serial.print(cpu_core->pc, HEX);
+            Serial.print(" OP:"); 
+            Serial.print(op, HEX);
+            
+            // Register Dump
+            Serial.print(" A:"); Serial.print(cpu_core->d.b.h, HEX);
+            Serial.print(" B:"); Serial.print(cpu_core->d.b.l, HEX);
+            Serial.print(" X:"); Serial.print(cpu_core->x, HEX);
+            Serial.print(" Y:"); Serial.print(cpu_core->y, HEX);
+            Serial.print(" U:"); Serial.print(cpu_core->u, HEX);
+            Serial.print(" S:"); Serial.print(cpu_core->s, HEX);
+            Serial.print(" CC:"); Serial.println(cpu_core->cc, HEX);
         }
         step();
     }
@@ -315,9 +373,19 @@ uint16_t resolve_indexed(mc6809__t* cpu) {
             case 0x08: case 0x18: addr = reg_val + (int8_t)fetch(cpu); break;  // 8-bit
             case 0x09: case 0x19: addr = reg_val + (int16_t)fetch16(cpu); break; // 16-bit
             
-            // PC Relative
-            case 0x0C: case 0x1C: addr = cpu->pc + (int8_t)fetch(cpu); break;  // 8-bit PC
-            case 0x0D: case 0x1D: addr = cpu->pc + (int16_t)fetch16(cpu); break; // 16-bit PC
+            // PC Relative (8-bit)
+            case 0x0C: case 0x1C: {
+                int8_t offset = (int8_t)fetch(cpu); // 1. Advance PC
+                addr = cpu->pc + offset;            // 2. Add to updated PC
+                break;  
+            }
+
+            // PC Relative (16-bit)
+            case 0x0D: case 0x1D: {
+                int16_t offset = (int16_t)fetch16(cpu); // 1. Force Fetch (PC advances by 2)
+                addr = cpu->pc + offset;                // 2. Add to the updated PC
+                break;
+            }
             
             // Extended Indirect [nnnn]
             case 0x1F: addr = fetch16(cpu); break; 
@@ -363,31 +431,6 @@ uint16_t get_ea(mc6809__t* cpu) {
 int MOTO6809::step() {
     mc6809__t* c = cpu_core;
     ANNHal* h = (ANNHal*)c->user;
-
-    // --- EXTENDED TRACE (Tokenizer + GETNCH) ---
-    //bool trace_tokenizer = (cpu_core->pc >= 0xD189 && cpu_core->pc <= 0xD1B0);
-    //bool trace_getnch    = (cpu_core->pc >= 0xE77B && cpu_core->pc <= 0xE790); // <--- NEW
-    //
-    //if (trace_tokenizer || trace_getnch) {
-    //    ANNHal* h = (ANNHal*)cpu_core->user;
-    //    uint8_t op = h->read(cpu_core->pc);
-    //
-    //    Serial.print("[TRACE] PC:"); 
-    //    Serial.print(cpu_core->pc, HEX);
-    //    Serial.print(" OP:"); 
-    //    Serial.print(op, HEX);
-    //
-    //    // Print critical registers
-    //    Serial.print(" | A:"); Serial.print(cpu_core->d.b.h, HEX);
-    //    Serial.print(" X:"); Serial.print(cpu_core->x, HEX);
-    //
-    //    // If we are at the specific buggy instruction, tell us what it's doing
-    //    if (cpu_core->pc == 0xE783) {
-    //        Serial.print(" <--- EXECUTING LA123 (GET CHAR)");
-    //    }
-    //    Serial.println();
-    //}
-    // -------------------------------------------
 
     // --- FLIGHT RECORDER START ---
     // Record state BEFORE execution
@@ -665,27 +708,47 @@ int MOTO6809::step() {
             c->cycles+=6; break;
 
         // --- NEGATE (NEG) - 00, 40, 50, etc ---
-        case 0x40: c->d.b.h = -c->d.b.h; set_nz(c, c->d.b.h); c->cycles+=2; break; // NEGA
-        case 0x50: c->d.b.l = -c->d.b.l; set_nz(c, c->d.b.l); c->cycles+=2; break; // NEGB
-        case 0x00: case 0x60: case 0x70: // NEG (Memory)
-            ea = get_ea(c); val = -h->read(ea); h->write(ea, val); 
-            set_nz(c, val); c->cycles+=6; break;
+        case 0x40: { // NEGA
+            uint8_t val = c->d.b.h;
+            c->d.b.h = -val;
+            set_nz(c, c->d.b.h);
+            // NEG Logic: C=1 if val!=0, V=1 if val=$80
+            if (val != 0) c->cc |= CC_C; else c->cc &= ~CC_C;
+            if (val == 0x80) c->cc |= CC_V;
+            c->cycles+=2; 
+        } break; 
+
+        case 0x50: { // NEGB
+            uint8_t val = c->d.b.l;
+            c->d.b.l = -val;
+            set_nz(c, c->d.b.l);
+            if (val != 0) c->cc |= CC_C; else c->cc &= ~CC_C;
+            if (val == 0x80) c->cc |= CC_V;
+            c->cycles+=2; 
+        } break;
+
+        case 0x00: case 0x60: case 0x70: { // NEG (Memory)
+            ea = get_ea(c); 
+            uint8_t old_val = h->read(ea);
+            val = -old_val; 
+            h->write(ea, val); 
+            set_nz(c, val); 
+            if (old_val != 0) c->cc |= CC_C; else c->cc &= ~CC_C;
+            if (old_val == 0x80) c->cc |= CC_V;
+            c->cycles+=6; 
+        } break;
 
         // --- COMPARES ---
         case 0x81: case 0x91: case 0xA1: case 0xB1: // CMPA
             ea = (c->mode == IMM) ? c->pc++ : get_ea(c);
             val = h->read(ea);
-            v16 = c->d.b.h - val;
-            set_nz(c, (uint8_t)v16);
-            if(c->d.b.h < val) c->cc |= CC_C; else c->cc &= ~CC_C; 
+            do_cmp8(c, c->d.b.h, val); // Calculates N, Z, V, C correctly
             c->cycles+=2; break;
 
          case 0xC1: case 0xD1: case 0xE1: case 0xF1: // CMPB
             ea = (c->mode == IMM) ? c->pc++ : get_ea(c);
             val = h->read(ea);
-            v16 = c->d.b.l - val;
-            set_nz(c, (uint8_t)v16);
-            if(c->d.b.l < val) c->cc |= CC_C; else c->cc &= ~CC_C;
+            do_cmp8(c, c->d.b.l, val); // Calculates N, Z, V, C correctly
             c->cycles+=2; break;
 
         // --- BRANCHES (8-bit Offset) ---
@@ -727,9 +790,9 @@ int MOTO6809::step() {
         
         // Signed Branches (The tricky ones)
         // BGE (Greater or Equal): (N XOR V) == 0
-        case 0x2C: do_branch(c, !((c->cc & CC_N) ? 1 : 0 ^ (c->cc & CC_V) ? 1 : 0)); break; 
-        // BLT (Less Than): (N XOR V) == 1
-        case 0x2D: do_branch(c, ((c->cc & CC_N) ? 1 : 0 ^ (c->cc & CC_V) ? 1 : 0)); break;
+        case 0x2D: do_branch(c, ((c->cc & CC_N) ? 1 : 0) ^ ((c->cc & CC_V) ? 1 : 0)); break;
+        // BGE (Opcode 0x2C)
+        case 0x2C: do_branch(c, !(((c->cc & CC_N) ? 1 : 0) ^ ((c->cc & CC_V) ? 1 : 0))); break;
         // BGT (Greater Than): Z=0 AND (N XOR V)=0
         case 0x2E: do_branch(c, !(c->cc & CC_Z) && !((c->cc & CC_N) ? 1 : 0 ^ (c->cc & CC_V) ? 1 : 0)); break;
         // BLE (Less or Equal): Z=1 OR (N XOR V)=1
@@ -748,8 +811,9 @@ int MOTO6809::step() {
         case 0x1029: do_lbranch(c, (c->cc & CC_V)); c->cycles+=5; break; // LBVS
         case 0x102A: do_lbranch(c, !(c->cc & CC_N)); c->cycles+=5; break; // LBPL
         case 0x102B: do_lbranch(c, (c->cc & CC_N)); c->cycles+=5; break; // LBMI
-        case 0x102C: do_lbranch(c, !((c->cc & CC_N) ? 1 : 0 ^ (c->cc & CC_V) ? 1 : 0)); c->cycles+=5; break; // LBGE
-        case 0x102D: do_lbranch(c, ((c->cc & CC_N) ? 1 : 0 ^ (c->cc & CC_V) ? 1 : 0)); c->cycles+=5; break; // LBLT
+        // Long Branches (LBLT 0x102D / LBGE 0x102C)
+        case 0x102D: do_lbranch(c, ((c->cc & CC_N) ? 1 : 0) ^ ((c->cc & CC_V) ? 1 : 0)); break;
+        case 0x102C: do_lbranch(c, !(((c->cc & CC_N) ? 1 : 0) ^ ((c->cc & CC_V) ? 1 : 0))); break;
         case 0x102E: do_lbranch(c, !(c->cc & CC_Z) && !((c->cc & CC_N) ? 1 : 0 ^ (c->cc & CC_V) ? 1 : 0)); c->cycles+=5; break; // LBGT
         case 0x102F: do_lbranch(c, (c->cc & CC_Z) || ((c->cc & CC_N) ? 1 : 0 ^ (c->cc & CC_V) ? 1 : 0)); c->cycles+=5; break; // LBLE
 
@@ -763,7 +827,13 @@ int MOTO6809::step() {
             break;
 
         // --- ALU ---
-        case 0x4F: c->d.b.h=0; set_nz(c, 0); c->cycles+=2; break; // CLRA
+        case 0x4F: // CLRA
+            c->d.b.h = 0; 
+            // CLR must set Z=1 and clear N, V, C
+            c->cc &= ~(CC_N | CC_V | CC_C); 
+            c->cc |= CC_Z;
+            c->cycles += 2; 
+            break;
         
         // --- LOGIC OPERATIONS ---
         case 0x84: case 0x94: case 0xA4: case 0xB4: // ANDA
