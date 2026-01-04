@@ -60,7 +60,9 @@ to either add a 3.3V to 5V transciever or add one. Writing to the display will w
 You would also need to mod the board to add additional keys.
 
 ![ANNE-1 on DSKY](ANNE-1.jpg)
+
 ![TM1638 with 16 keys][tm1638-all.jpg]
+
 ![TM1638 with 8 keys][tm1638-full.jpg]
 
 ### Software
