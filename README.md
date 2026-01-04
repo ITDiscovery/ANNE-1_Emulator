@@ -52,6 +52,18 @@ The ANNE-1 uses a strict memory map enforced by the Hardware Abstraction Layer (
 | **A0** | ADC0 | External | Tape/Sensor In (`$FF25`) |
 
 ## 6. Building the Project
+
+### Hardware
+An ESP-8266 runs this platform just faster than a real 6809. A TM1638 Board/Module is also needed, I used my DSKY project, and have
+included (at the time of this writing) an untested PCB. There are also lots of TM1638 boards out there, just don't forget to ensure 
+to either add a 3.3V to 5V transciever or add one. Writing to the display will work without the transciver, but reading keys will not. 
+You would also need to mod the board to add additional keys.
+
+![ANNE-1 on DSKY](ANNE-1.jpg)
+![TM1638 with 16 keys][tm1638-all.jpg]
+![TM1638 with 8 keys][tm1638-full.jpg]
+
+### Software
 The toolchain uses Python scripts to assemble the 6809 source code into C-compatible header files for the Arduino IDE.
 
 1.  **Monitor:** `python build_monitor.py` -> Generates `ANNE_ROM.h`
