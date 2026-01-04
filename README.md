@@ -61,9 +61,9 @@ You would also need to mod the board to add additional keys.
 
 ![ANNE-1 on DSKY](ANNE-1.jpg)
 
-![TM1638 with 16 keys][tm1638-all.jpg]
+![TM1638 with 16 keys](tm1638-all.jpg)
 
-![TM1638 with 8 keys][tm1638-full.jpg]
+![TM1638 with 8 keys](tm1638-full.jpg)
 
 ### Software
 The toolchain uses Python scripts to assemble the 6809 source code into C-compatible header files for the Arduino IDE.
