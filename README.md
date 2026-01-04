@@ -1,102 +1,75 @@
-# ANNE-1_Emulator
-# ANNE-1: The ESP8266 6809 Emulator
+# ANNE-1 Emulator (ESP8266 Edition)
 
-**ANNE-1** is a Motorola 6809 computer emulator running entirely on an ESP8266 microcontroller (NodeMCU/Wemos D1 Mini). It recreates the experience of a classic single-board computer (like the KIM-1), featuring a physical hex keypad/display interface and a full serial TTY monitor.
+**Platform:** ESP8266 (NodeMCU / Wemos D1 Mini)  
+**Core:** Motorola 6809 CPU Emulation
 
-## 🚀 Features
+## 1. Overview
+The ANNE-1 is a custom 8-bit computer architecture emulated on the ESP8266. It runs a modified version of **Microsoft Extended Color BASIC** and a custom **System Monitor**. The system features dual-mode operation: it can be controlled via a serial terminal (TTY) or a **TM1638** LED & Keypad module (simulating a front panel).
 
-* **Core:** Full emulation of the **Motorola 6809 CPU** (User & System stacks, Index registers, 16-bit math).
-* **Dual Mode:**
-    * **Keypad Mode:** Operates standalone using a TM1638 LED & Key module.
-    * **TTY Mode:** Operates via USB Serial Terminal (Putty/Screen) with a KIM-1 style monitor.
-* **Memory:** 16KB User RAM (`$0000` - `$3FFF`) + 8KB System ROM.
-* **I/O:**
-    * Emulated **6850 ACIA** for Serial communications.
-    * Direct Hardware Abstraction Layer (HAL) for the TM1638 display.
+## 2. System Architecture
+* **CPU:** Emulated 6809 (Generated via Google Gemini over several weeks and tested against a known test suite).
+* **RAM:** 16KB User RAM (`$0000` - `$3FFF`).
+* **ROM:**
+    * **BASIC:** 12KB (`$C000` - `$EFFF`) - Microsoft Extended BASIC (Derived from Grant Searle's version).
+    * **Monitor:** 4KB (`$F000` - `$FFFF`) - Custom "ANNE-1 Mon V13".
+* **I/O:** Memory-mapped I/O located at `$FF00` - `$FF69`.
 
-## 🛠 Hardware Requirements
+## 3. Memory Map & I/O Registers
+The ANNE-1 uses a strict memory map enforced by the Hardware Abstraction Layer (`ANNEHal.cpp`).
 
-1.  **ESP8266 Board:** Wemos D1 Mini, NodeMCU, or generic ESP-12F.
-2.  **TM1638 Module:** Common 8-digit, 8-key, 8-LED display board.
-3.  **Jumper Wire:** Required for selecting TTY mode on boot.
-
-### Wiring
-
-| ESP8266 Pin | Function | TM1638 Pin | Note |
-| :--- | :--- | :--- | :--- |
-| **D0** (GPIO16) | Strobe (STB) | STB | Chip Select |
-| **D1** (GPIO5) | Data (DIO) | DIO | Bi-directional Data |
-| **D5** (GPIO14) | Clock (CLK) | CLK | Synchronous Clock |
-| **D7** (GPIO13) | Mode Select | **GND** | **Low** = TTY Mode, **High/Open** = Keypad Mode |
-| **3.3V/5V** | Power | VCC | 3.3V recommended for logic, 5V for brightness |
-| **GND** | Ground | GND | Common Ground |
-
-## 💾 Memory Map
-
-| Address Range | Description | Notes |
+| Address Range | Description | Function |
 | :--- | :--- | :--- |
-| `$0000` - `$3FFF` | **System RAM** | 16KB User Memory. Zero page `$0000-$00FF`. |
-| `$4000` - `$BFFF` | *Unmapped* | Expansion space. |
-| `$C000` | **Keyboard Input** | Read-only. Returns ASCII of pressed key. |
-| `$C001` - `$C003` | **Display Output** | Write-only. Hi/Lo Byte and Data Byte. |
-| `$C004` | **ACIA Status** | Emulated 6850 Status (RDRF/TDRE). |
-| `$C005` | **ACIA Data** | Emulated 6850 Data (UART I/O). |
-| `$E000` - `$FFFF` | **Monitor ROM** | "GoldMaster" ANNE-1 Monitor Firmware. |
+| **$0000 - $3FFF** | **User RAM** | 16KB Program & Variable Space. |
+| **$4000 - $BFFF** | *Unused* | Reserved / Empty. |
+| **$C000 - $EFFF** | **BASIC ROM** | 12KB Extended BASIC interpreter. |
+| **$F000 - $FFFF** | **Monitor ROM** | 4KB System Monitor & Vector Table. |
 
----
+### I/O Register Map ($FFxx)
 
-## 🖥 Usage
+| Address | R/W | Description |
+| :--- | :--- | :--- |
+| **$FF00** | R | **Keypad Input:** Returns ASCII of last TM1638 key press. |
+| **$FF20** | W | **Display High:** Writes to upper 2 digits of TM1638. |
+| **$FF21** | W | **Display Low:** Writes to middle 2 digits of TM1638. |
+| **$FF22** | W | **Display Data:** Writes to lower 2 digits of TM1638. |
+| **$FF23** | W | **LED Control:** 8-bit register mapping to TM1638 LEDs 0-7. |
+| **$FF24** | W | **GPIO Output:** Bit 0 maps to **Pin D6 (GPIO12)**. |
+| **$FF25** | R | **ADC Input:** Reads **Pin A0**, scaled to 8-bit (0-255). |
+| **$FF68** | R | **ACIA Status:** Bit 0=Rx Ready, Bit 1=Tx Ready. |
+| **$FF69** | R/W | **ACIA Data:** Serial I/O (Console). Auto-maps DEL(7F) to BS(08). |
 
-The system detects the operating mode at startup based on the state of **Pin D7**.
+## 4. Hardware Connections (ESP8266)
 
-### 1. Keypad Mode (Default)
-*Boot with D7 disconnected.*
-The system behaves like a classic trainer kit. Use the keys on the TM1638 to enter hex codes.
+| ESP Pin | GPIO | Component | Function |
+| :--- | :--- | :--- | :--- |
+| **D0** | 16 | TM1638 | STB1 (Strobe) |
+| **D1** | 5 | TM1638 | DIO (Data) |
+| **D2** | 4 | Button | Reset (Active Low) |
+| **D3** | 0 | Button | NMI / Stop (Active Low) |
+| **D5** | 14 | TM1638 | CLK (Clock) |
+| **D6** | 12 | External | Tape/GPIO Out (`$FF24`) |
+| **D7** | 13 | Jumper | Mode Select (GND = TTY) |
+| **A0** | ADC0 | External | Tape/Sensor In (`$FF25`) |
 
-**Key Mapping:**
-* **0-F:** Enter Hex Data.
-* **A (Button 1):** `AD` (Address Mode) - Select memory address.
-* **B (Button 2):** `DA` (Data Mode) - Write data and increment.
-* **C (Button 3):** `+` (Increment) - Next address.
-* **D (Button 4):** `GO` - Execute program at current address.
-* **Shift + ST:** NMI (Stop/Break).
-* **Shift + RS:** Reset.
+## 6. Building the Project
+The toolchain uses Python scripts to assemble the 6809 source code into C-compatible header files for the Arduino IDE.
 
-### 2. TTY Mode (Serial Monitor)
-*Boot with D7 connected to GND.*
-Connect via USB (115200 baud). The system acts as a KIM-1 style terminal.
+1.  **Monitor:** `python build_monitor.py` -> Generates `ANNE_ROM.h`
+2.  **BASIC:** `python build_basic.py` -> Generates `BASIC_ROM.h`
+3.  **Compile:** Open `ANNE1onESP8266.ino` in Arduino IDE and upload to ESP8266.
 
-**Commands:**
-* **Input:** Type 4 digits for Address, 2 digits for Data.
-* **SPACE:**
-    * *If Address typed:* Open that address.
-    * *If Data typed:* Store data and move to next address (`Store+`).
-* **X:** Exit Data Mode (return to prompt).
-* **G:** Go (Execute program at current address).
-* **R:** Reset system.
-* **P:** Restore PC (Return to Monitor entry).
+## 7. Usage
+### Serial Mode
+* Set Jumper **D7** to GND.
+* Connect via Serial Terminal (115200 Baud, 8N1).
+* Press **Reset**. You will see the BASIC banner.
 
-**Example Session:**
-```text
-ANNE-1
-> 2000 [SPACE]      (Select Address $2000)
-2000 - 00           (Shows current data)
-> A9 [SPACE]        (Write $A9 to $2000, move to $2001)
-2001 - 00
-> [X]               (Exit to prompt)
-> 2000 [SPACE]      (Verify)
-2000 - A9
-> [G]               (Run program)
-```
-
-## Installation
-- Clone this repository.
-- Open ANNE1onESP8266.ino in the Arduino IDE.
-- Install the ESP8266 Board Manager package.
-- Optional: If using a different TM1638 library, ensure pin mappings in TM1638.h match your wiring.
-- Upload to your device.
-
- ## Credits
-- Emulator Core: Custom C++ implementation of the MC6809.
-- Monitor: Custom 6809 Assembly ("GoldMaster 10") inspired by the MOS KIM-1.
-- Platform: ESP8266 Community.
+### Keypad Mode (Monitor)
+* Remove Jumper **D7**.
+* Press **Reset**. The TM1638 display will show the current address/data.
+* **Keys:**
+    * `0-F`: Enter Hex Digits.
+    * `a`: Address Mode (Set Address).
+    * `d`: Data Mode (Modify Data at Address).
+    * `+`: Increment Address.
+    * `GO`: Execute from current address.
