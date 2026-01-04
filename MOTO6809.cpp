@@ -266,22 +266,16 @@ void MOTO6809::Run(int32_t cycles) {
     while (cpu_core->cycles < target) {
         hal->system_check(this);
 
-        // --- TRIGGER TRACE ---
-        // Trigger slightly before the crash site
-        //if (cpu_core->pc == 0x2000 && traceCountdown == 0) {
-        //    Serial.println("\n--- TRACE START (PCR TESTS) ---");
-        //    traceCountdown = 250; // Dump the next 20 instructions
-        //}
-        // --- STACK RUNAWAY TRAP ---
-        // If PC points into the stack area (RAM_TOP), something has gone wrong.
-        //if (cpu_core->pc >= 0x3F00 && cpu_core->pc <= 0x3FFF) {
-        //     if (traceCountdown == 0) { // Only print if not already tracing
-        //         Serial.print("\n[CRASH] PC in STACK at ");
-        //         Serial.println(cpu_core->pc, HEX);
-        //         traceCountdown = 10;
-        //     }
-        //}
-        if (hal->debug_dump == true) {
+        #ifdef DEBUG
+        if (cpu_core->pc == 0x8000) {
+            Serial.println("\n>>> TRAP: Exec Fetch <<<");
+            Serial.print("Fetched Char (A): "); Serial.print(cpu_core->d.b.h, HEX); // A register
+        
+            hal->debug_dump = true;
+            traceCountdown = 100;
+        }
+        // ---------------------------------------------------
+        if (hal->debug_dump == true && traceCountdown > 0) {
             uint8_t op = hal->read(cpu_core->pc);
             
             Serial.print("[");
@@ -292,6 +286,8 @@ void MOTO6809::Run(int32_t cycles) {
             Serial.print(op, HEX);
             
             // Register Dump
+            Serial.print(" BINVAL:"); Serial.print(hal->read(0x2B));
+
             Serial.print(" A:"); Serial.print(cpu_core->d.b.h, HEX);
             Serial.print(" B:"); Serial.print(cpu_core->d.b.l, HEX);
             Serial.print(" X:"); Serial.print(cpu_core->x, HEX);
@@ -299,7 +295,10 @@ void MOTO6809::Run(int32_t cycles) {
             Serial.print(" U:"); Serial.print(cpu_core->u, HEX);
             Serial.print(" S:"); Serial.print(cpu_core->s, HEX);
             Serial.print(" CC:"); Serial.println(cpu_core->cc, HEX);
-        }
+            --traceCountdown;
+        } 
+        #endif
+
         step();
     }
 }

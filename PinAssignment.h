@@ -28,6 +28,9 @@
 // Mode Jumper
 #define PIN_MODE_SELECT 13 // D7 (GPIO13) -> Existing TTY/Keypad Jumper
 
+// Change Display to have Data on first two digits
+#define DISPLAY_FLIP
+
 // Tape Interface (Future Use)
 #define PIN_TAPE_OUT 12   // D6
 #define PIN_TAPE_IN  A0   // A0

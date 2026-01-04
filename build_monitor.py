@@ -4,18 +4,18 @@ import subprocess
 
 # --- CONFIGURATION ---
 ASM_TOOL    = "asm6809"
-ASM_FILE    = "basic.asm"
-BIN_FILE    = "basic.bin"
-LST_FILE    = "basic.lst"
-HEADER_FILE = "BASIC_ROM.h"
-ARRAY_NAME  = "ANNE_BASIC_ROM"
+ASM_FILE    = "monitor.asm"       # [CHANGED] Input Source
+BIN_FILE    = "monitor.bin"
+LST_FILE    = "monitor.lst"
+HEADER_FILE = "ANNE_ROM.h"        # [CHANGED] Output Header
+ARRAY_NAME  = "ANNE_MONITOR_ROM"  # [CHANGED] Array Name
 
 # --- TARGET CONFIGURATION ---
-TARGET_START = 0xC000   # [CHANGED] New start address
-TARGET_SIZE  = 0x3000   # [CHANGED] 12KB Window ($C000-$EFFF)
+TARGET_START = 0xF000   # [CHANGED] Monitor Start Address (Top 4K)
+TARGET_SIZE  = 0x1000   # [CHANGED] 4KB Window ($F000-$FFFF)
 
 def main():
-    print(f"--- ANNE-1 BASIC Toolchain: Packaging for ${TARGET_START:X} ---")
+    print(f"--- ANNE-1 MONITOR Toolchain: Packaging for ${TARGET_START:X} ---")
 
     # 1. RUN ASSEMBLER
     print(f"🔨 Assembling {ASM_FILE}...")
@@ -35,30 +35,34 @@ def main():
         return
 
     # STRIP PADDING
-    if len(data) > TARGET_START: 
+    # Assemblers often pad from $0000 to ORG. 
+    # If file size suggests it contains the full memory map, strip the prefix.
+    if len(data) >= TARGET_START: 
         print(f"ℹ️  Stripping leading {TARGET_START} bytes...")
         data = data[TARGET_START:] 
 
-    # SAFETY PADDING
+    # SAFETY PADDING / TRUNCATION
     if len(data) < TARGET_SIZE:
         pad = TARGET_SIZE - len(data)
         print(f"⚠️  Padding with {pad} bytes...")
         data.extend(b'\xFF' * pad)
     elif len(data) > TARGET_SIZE:
-        print(f"❌ FATAL: Size {len(data)} exceeds 4KB!")
+        print(f"❌ FATAL: Size {len(data)} exceeds limit ({TARGET_SIZE})!")
         return
 
     # 3. GENERATE HEADER
     with open(HEADER_FILE, "w") as out:
-        out.write(f"// Target: 0x{TARGET_START:X}, Size: {len(data)}\n")
-        out.write(f"#ifndef BASIC_ROM_H\n#define BASIC_ROM_H\n#include <pgmspace.h>\n")
+        out.write(f"// ANNE-1 Monitor ROM \n")
+        out.write(f"// Target: 0x{TARGET_START:X}, Size: {len(data)} bytes\n")
+        out.write(f"#ifndef ANNE_ROM_H\n#define ANNE_ROM_H\n#include <pgmspace.h>\n\n")
         out.write(f"const uint8_t {ARRAY_NAME}[] PROGMEM = {{\n")
         for i, b in enumerate(data):
             out.write(f"0x{b:02X}, ")
-            if (i+1)%16==0: out.write("\n")
+            if (i+1) % 16 == 0: 
+                out.write("\n")
         out.write("};\n#endif\n")
     
-    print("✅ DONE.")
+    print(f"✅ DONE. Header written to {HEADER_FILE}")
 
 if __name__ == "__main__":
     main()

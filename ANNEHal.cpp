@@ -1,7 +1,6 @@
 #include "ANNEHal.h" 
 #include "ANNE_ROM.h"
-//#include "BASIC_ROM.h"
-#include "CPU_TEST_ROM.h"
+#include "BASIC_ROM.h"
 
 ANNHal::ANNHal() {}
 
@@ -13,34 +12,32 @@ void ANNHal::begin() {
     // NEW: Setup Built-in LED for heartbeat
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, HIGH);
+
+    // Configure Tape Output ---
+    pinMode(PIN_TAPE_OUT, OUTPUT);
+    digitalWrite(PIN_TAPE_OUT, LOW); // Default to Low
+    // (PIN_TAPE_IN / A0 does not require pinMode on ESP8266)
 }
 
 bool ANNHal::initMemory() {
     if (ram) free(ram);
     if (rom) free(rom);
     
-    // 1. Allocate RAM as usual
-    ram = (uint8_t*)malloc(RAM_SIZE); // 16KB ($0000-$3FFF)
-    rom = (uint8_t*)malloc(ROM_SIZE); // Monitor RAM ($F000-$FFFF)
-
-    // 2. Allocate the "Test Window" (Formerly BASIC)
-    // We defined BASIC_SIZE as 20480 in the previous step ($8000-$CFFF)
-    // We allocate RAM for it so the test can write to variables if needed.
-    uint8_t* test_area = (uint8_t*)malloc(BASIC_SIZE);
+    // 1. Allocate User RAM ($0000-$3FFF)
+    ram = (uint8_t*)malloc(RAM_SIZE); 
     
-    // 3. Point basic_rom to this new writable area
-    basic_rom = test_area; 
+    // 2. Allocate Monitor RAM Buffer ($F000-$FFFF)
+    rom = (uint8_t*)malloc(ROM_SIZE); 
 
-    if (!ram || !rom || !basic_rom) return false;
+    if (!ram || !rom) return false;
 
-    // 4. Clear Memory
+    // 3. Point BASIC pointer to the PROGMEM array (Flash)
+    // We don't need to malloc this since it's Read-Only
+    basic_rom = ANNE_BASIC_ROM; 
+
+    // 4. Clear/Init Memory
     memset(ram, 0x00, RAM_SIZE);
     memset(rom, 0xFF, ROM_SIZE);
-    memset(test_area, 0x00, BASIC_SIZE);
-
-    // 5. LOAD THE TEST SUITE
-    // Map: $8100 (Code Start) - $8000 (Base) = Offset 0x100
-    memcpy(test_area, CPU_TEST_ROM, sizeof(CPU_TEST_ROM));
 
     return true;
 }
@@ -58,62 +55,56 @@ uint8_t ANNHal::read(uint16_t addr) {
     // 1. RAM ($0000 - $3FFF)
     if (addr < 0x4000) return ram[addr];
 
-    // 2. EXTENDED BASIC ($C000 - $EFFF) [12KB]
-    //if (addr >= 0xC000 && addr < 0xF000) {
-    //    return pgm_read_byte(&basic_rom[addr - 0xC000]);
-    //}
-    // 2A. CPU TEST ROM ($8100 - $C580) [Length: 0x4480]
-    if (addr >= 0x8100 && addr < 0xC580) {
-        return pgm_read_byte(&basic_rom[addr - 0x8100]);
+    // 2. BASIC ROM WINDOW ($C000 - $EFFF) [12KB]
+    // We map this entire range to the basic_rom array.
+    // Note: ensure your ANNE_BASIC_ROM array in "ANNE_ROM.h" is large enough 
+    // or properly padded if you strictly use offsets.
+    if (addr >= 0xC000 && addr < 0xF000) {
+        // If your binary is 4k and you want it at D000, 
+        // you might need offset math. For now, let's assume
+        // the binary is compiled to fit where it is placed.
+        // Safety check to prevent reading out of bounds of the array
+        uint16_t offset = addr - 0xC000;
+        if (offset < BASIC_SIZE) { 
+             return pgm_read_byte(&basic_rom[offset]);
+        }
+        return 0xFF; // Empty ROM space
     }
 
     // 3. I/O REGION ($FFxx) 
     if (addr >= 0xFF00 && addr <= 0xFF69) {
-        
-        // --- OPTIMIZED LED BLINKING ---
-        // Helper Lambda to handle state caching
-        // Only writes to hardware if the state actually changes
-        auto updateLed = [&](uint8_t idx, uint8_t speedDiv) {
-            static int lastState[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-            int newState = (millis() / speedDiv) % 2;
-            if (lastState[idx] != newState) {
-                hardware.setLed(idx, newState);
-                lastState[idx] = newState;
-            }
-        };
-
-        // LED 0: Activity Heartbeat (Slow)
-        updateLed(0, 200);
-
-        // A. Keypad Read (Parallel)
         if (addr == ANNE_KEY_IN) {
-            updateLed(1, 100); // LED 1: Keypad Access
+            hardware.setLed(0, (millis() / 500) % 2);
             return last_key_ascii;
         }
-
-        // B. ACIA Status Register ($FF68)
         if (addr == ANNE_ACIA_STS) {
-            updateLed(2, 50); // LED 2: Fast Blink (Polling)
-            
-            uint8_t status = 0x02; // TDRE always ready
-            if (Serial.available() > 0) status |= 0x01; 
-            if (!keypadMode) status |= 0x80; 
-            return status;
+             uint8_t status = 0x02; 
+             hardware.setLed(1, (millis() / 500) % 2); 
+             if (Serial.available() > 0) status |= 0x01; 
+             if (!keypadMode) status |= 0x80; 
+             return status;
         }
-
-        // C. ACIA Data Register ($FF69)
         if (addr == ANNE_ACIA_DAT) {
-             // For Data Read, we want a momentary flash, not a blink pattern.
-             // We just force it ON, then rely on the Status polling loop to turn it off eventually
-             // or just accept it might stay on briefly. 
-             // Ideally, just use the blinker for consistency:
-             updateLed(3, 50); 
-
-            if (Serial.available() > 0) return Serial.read();
+            hardware.setLed(2, (millis() / 500) % 2); 
+            if (Serial.available() > 0) {
+                uint8_t c = Serial.read();
+                // Map ASCII 0x7F (DEL) to 0x08 (BS) for backspace compatibility
+                if (c == 0x7F) c = 0x08; 
+                return c;
+            }
             return 0;
         }
-        
-        // D. Display Readback
+        // Tape Input (ADC) ---
+        if (addr == ANNE_TAPE_IN) {
+            // Read 10-bit value (0-1023), shift down to 8-bit (0-255)
+            // Note: analogRead takes ~100us, which is slow but fine for BASIC
+            return (uint8_t)(analogRead(PIN_TAPE_IN) >> 2);
+        }
+
+        // Optional: Read back the state of the Output pin
+        if (addr == ANNE_TAPE_OUT) {
+            return digitalRead(PIN_TAPE_OUT) ? 1 : 0;
+        }
         if (addr == ANNE_DISP_HI) return disp_hi;
         if (addr == ANNE_DISP_LO) return disp_lo;
         if (addr == ANNE_DISP_DAT) return disp_dat;
@@ -139,20 +130,51 @@ void ANNHal::write(uint16_t addr, uint8_t val) {
     if (addr >= 0xFF00 && addr <= 0xFF69) {
         if (addr == ANNE_DISP_HI) {
             disp_hi = val;
+            #ifdef DISPLAY_FLIP
+            hardware.writeDigit(2, (val >> 4) & 0x0F);
+            hardware.writeDigit(3, val & 0x0F);
+            #else
             hardware.writeDigit(0, (val >> 4) & 0x0F);
             hardware.writeDigit(1, val & 0x0F);
+            #endif
             return;
         }
         if (addr == ANNE_DISP_LO) {
             disp_lo = val;
+            #ifdef DISPLAY_FLIP
+            hardware.writeDigit(4, (val >> 4) & 0x0F);
+            hardware.writeDigit(5, val & 0x0F);
+            #else
             hardware.writeDigit(2, (val >> 4) & 0x0F);
             hardware.writeDigit(3, val & 0x0F);
+            #endif
             return;
         }
         if (addr == ANNE_DISP_DAT) {
             disp_dat = val;
+            #ifdef DISPLAY_FLIP
+            hardware.writeDigit(0, (val >> 4) & 0x0F);
+            hardware.writeDigit(1, val & 0x0F);
+            #else
             hardware.writeDigit(4, (val >> 4) & 0x0F);
             hardware.writeDigit(5, val & 0x0F);
+            #endif
+            return;
+        }
+        // 8-LED Control Register ($FF23) ---
+        if (addr == ANNE_LED_REG) {
+            // Loop through bits 0-7
+            for (int i = 0; i < 8; i++) {
+                // Check if bit 'i' is set
+                uint8_t state = (val >> i) & 0x01;
+                hardware.setLed(i, state); 
+            }
+            return;
+        }
+        // Tape Output (GPIO 12) ---
+        if (addr == ANNE_TAPE_OUT) {
+            // Write LSB to pin (0 or 1)
+            digitalWrite(PIN_TAPE_OUT, val & 0x01);
             return;
         }
         if (addr == ANNE_ACIA_DAT) {
@@ -160,7 +182,6 @@ void ANNHal::write(uint16_t addr, uint8_t val) {
             return;
         }
     }
-    // Writes to ROM areas ($C000+) are ignored
 }
 
 void ANNHal::updateHardware() {

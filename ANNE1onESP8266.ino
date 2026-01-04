@@ -14,6 +14,7 @@ MOTO6809 *cpu = nullptr;
 // Volatile is required so the main loop sees changes made by interrupts
 volatile bool triggerReset = false;
 volatile bool triggerNMI = false;
+unsigned long lastHwUpdate = 0;
 
 // --- INTERRUPT SERVICE ROUTINES (ISRs) ---
 // IRAM_ATTR places these in RAM for maximum speed
@@ -71,16 +72,13 @@ void setup() {
   if (digitalRead(PIN_MODE_SELECT) == LOW) {
     hal->keypadMode = false;
     Serial.println(">> Jumper Detected: TTY Mode Active");
-    //Serial.println(">> EXT BASIC at 0xC000");
-    cpu->setPC(0x8100);
+    Serial.println(">> ANNE-1 BASIC at 0xC000");
   } else {
     hal->keypadMode = true;
     Serial.println(">> No Jumper: Keypad Mode Active");
   }
   hal->debug_dump = false;
 }
-
-unsigned long lastHwUpdate = 0;
 
 void loop() {
   // 1. INTERRUPT HANDLING (Instant)
@@ -93,8 +91,8 @@ void loop() {
     if (cpu != nullptr) { 
       // --- DIAGNOSTIC DUMP ---
       uint16_t currentPC = cpu->get_pc_register();
-      Serial.print("\n[DIAGNOSTIC] NMI Button Pressed!");
-      Serial.print(" CPU stuck at PC: ");
+      Serial.print("\nNMI Button Pressed!");
+      Serial.print(" CPU at PC: ");
       Serial.println(currentPC, HEX);
       
       // Optional: Peek at the instruction causing the hang
@@ -111,8 +109,10 @@ void loop() {
   // 2. RUN CPU (Massive Speed Chunk)
   // We can safely run 16k+ cycles because writes are now instant!
   if (cpu != nullptr) {
-      cpu->Run(4096); 
+      cpu->Run(4096);
+      yield();
   }
+  //uint16_t previous_pc = cpu->get_pc_register(); 
 
   // 3. UPDATE HARDWARE (Every 30ms -> ~33fps)
   // This handles both screen refresh and keypad polling
